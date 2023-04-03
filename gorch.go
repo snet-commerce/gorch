@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"os/signal"
-	"sync"
 )
 
 type optionFunc func(o *options)
@@ -22,16 +21,12 @@ func WithStopSignals(signals ...os.Signal) optionFunc {
 }
 
 type Orchestrator struct {
-	wg      sync.WaitGroup
-	stopCh  chan os.Signal
-	errorCh chan error
+	signals []os.Signal
 	before  []HookFunc
 	after   []HookFunc
 }
 
 func New(optFns ...optionFunc) *Orchestrator {
-	stopCh := make(chan os.Signal, 1)
-
 	var opts options
 	for i := range optFns {
 		optFn := optFns[i]
@@ -43,12 +38,9 @@ func New(optFns ...optionFunc) *Orchestrator {
 	if len(opts.signals) == 0 {
 		opts.signals = append(opts.signals, os.Interrupt)
 	}
-	signal.Notify(stopCh, opts.signals...)
 
 	return &Orchestrator{
-		wg:      sync.WaitGroup{},
-		stopCh:  stopCh,
-		errorCh: make(chan error, 1),
+		signals: opts.signals,
 		before:  make([]HookFunc, 0),
 		after:   make([]HookFunc, 0),
 	}
@@ -64,72 +56,36 @@ func (o *Orchestrator) After(aft ...HookFunc) *Orchestrator {
 	return o
 }
 
-func (o *Orchestrator) StopChannel() <-chan os.Signal {
-	return o.stopCh
-}
+func (o *Orchestrator) Serve(starters ...HookFunc) <-chan error {
+	errCh := make(chan error, 1)
+	stopCh := make(chan os.Signal, 1)
+	signal.Notify(stopCh, o.signals...)
 
-func (o *Orchestrator) ErrorChannel() <-chan error {
-	return o.errorCh
-}
-
-func (o *Orchestrator) Start(start HookFunc) error {
 	if err := o.beforeHooks(); err != nil {
-		return err
+		errCh <- err
+		close(errCh)
+		return errCh
 	}
 
 	go func() {
-		if err := start(); err != nil {
-			o.errorCh <- err
+		for i := range starters {
+			startFn := starters[i]
+			go func(start HookFunc) {
+				if err := start(); err != nil {
+					errCh <- err
+				}
+			}(startFn)
 		}
+
+		<-stopCh
+		if errs := o.afterHooks(); len(errs) > 0 {
+			errCh <- errors.Join(errs...)
+		}
+
+		close(errCh)
 	}()
 
-	errs := make([]error, 0)
-	select {
-	case <-o.stopCh:
-	case err := <-o.errorCh:
-		errs = append(errs, err)
-	}
-
-	for _, hook := range o.after {
-		if err := hook(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-func (o *Orchestrator) StartAsync(start HookFunc) error {
-	if err := o.beforeHooks(); err != nil {
-		return err
-	}
-
-	o.wg.Add(1)
-	go func() {
-		errs := make([]error, 0)
-
-		if err := start(); err != nil {
-			errs = append(errs, err)
-		}
-
-		for _, hook := range o.after {
-			if err := hook(); err != nil {
-				errs = append(errs, err)
-			}
-		}
-
-		if len(errs) > 0 {
-			o.errorCh <- errors.Join(errs...)
-		}
-
-		o.wg.Done()
-	}()
-
-	return nil
-}
-
-func (o *Orchestrator) Wait() {
-	o.wg.Wait()
+	return errCh
 }
 
 func (o *Orchestrator) beforeHooks() error {
@@ -139,4 +95,14 @@ func (o *Orchestrator) beforeHooks() error {
 		}
 	}
 	return nil
+}
+
+func (o *Orchestrator) afterHooks() []error {
+	errs := make([]error, 0)
+	for _, hook := range o.after {
+		if err := hook(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
 }
