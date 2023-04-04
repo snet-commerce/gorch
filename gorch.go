@@ -21,9 +21,9 @@ func WithStopSignals(signals ...os.Signal) optionFunc {
 }
 
 type Orchestrator struct {
-	signals []os.Signal
-	before  []HookFunc
-	after   []HookFunc
+	stopCh chan os.Signal
+	before []HookFunc
+	after  []HookFunc
 }
 
 func New(optFns ...optionFunc) *Orchestrator {
@@ -39,10 +39,13 @@ func New(optFns ...optionFunc) *Orchestrator {
 		opts.signals = append(opts.signals, os.Interrupt)
 	}
 
+	stopCh := make(chan os.Signal, 1)
+	signal.Notify(stopCh, opts.signals...)
+
 	return &Orchestrator{
-		signals: opts.signals,
-		before:  make([]HookFunc, 0),
-		after:   make([]HookFunc, 0),
+		stopCh: stopCh,
+		before: make([]HookFunc, 0),
+		after:  make([]HookFunc, 0),
 	}
 }
 
@@ -58,8 +61,6 @@ func (o *Orchestrator) After(aft ...HookFunc) *Orchestrator {
 
 func (o *Orchestrator) Serve(starters ...HookFunc) <-chan error {
 	errCh := make(chan error, 1)
-	stopCh := make(chan os.Signal, 1)
-	signal.Notify(stopCh, o.signals...)
 
 	if err := o.beforeHooks(); err != nil {
 		errCh <- err
@@ -77,7 +78,7 @@ func (o *Orchestrator) Serve(starters ...HookFunc) <-chan error {
 			}(startFn)
 		}
 
-		<-stopCh
+		<-o.stopCh
 		if errs := o.afterHooks(); len(errs) > 0 {
 			errCh <- errors.Join(errs...)
 		}
@@ -86,6 +87,10 @@ func (o *Orchestrator) Serve(starters ...HookFunc) <-chan error {
 	}()
 
 	return errCh
+}
+
+func (o *Orchestrator) Stop() {
+	o.stopCh <- os.Interrupt
 }
 
 func (o *Orchestrator) beforeHooks() error {

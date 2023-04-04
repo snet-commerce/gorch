@@ -43,13 +43,10 @@ func TestOrchestrator_StarterFailed(t *testing.T) {
 	errCh <- startErr
 	for err := range orch.Serve(starter1, starter2) {
 		if errors.Is(startErr, err) {
-			break
+			orch.Stop()
+			continue
 		}
 		t.Fatalf("expect an {%v} error to be raised but got {%v}", startErr, err)
-	}
-
-	if err := raiseSignal(stopSignal); err != nil {
-		t.Fatalf("failed to sent stop signal: %v", err)
 	}
 }
 
